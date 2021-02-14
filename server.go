@@ -8,8 +8,6 @@ import (
 	"bufio"
 	"crypto/tls"
 	"errors"
-	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/url"
@@ -17,25 +15,13 @@ import (
 	"time"
 )
 
-const DefaultPort = 1965
-
-type WriteFinisher interface {
-	io.Writer
-	Finish() error
-}
-
-type WriteCloseFinisher interface {
-	io.WriteCloser
-	Finish() error
-}
-
-type Conn struct {
+type ServerConn struct {
 	raw net.Conn // nil after closing.
 	tls *tls.Conn
 }
 
 // Close uncleanly.  Finish must not be called after this.
-func (c *Conn) Close() error {
+func (c *ServerConn) Close() error {
 	if c.raw == nil {
 		return nil
 	}
@@ -44,7 +30,7 @@ func (c *Conn) Close() error {
 }
 
 // CloseWrite uncleanly.  Finish must not be called after this.
-func (c *Conn) CloseWrite() error {
+func (c *ServerConn) CloseWrite() error {
 	if c.raw == nil {
 		return nil
 	}
@@ -52,12 +38,12 @@ func (c *Conn) CloseWrite() error {
 	return c.raw.Close()
 }
 
-func (c *Conn) ConnectionState() tls.ConnectionState {
+func (c *ServerConn) ConnectionState() tls.ConnectionState {
 	return c.tls.ConnectionState()
 }
 
 // Finish writing cleanly.  Close can be called after this.
-func (c *Conn) Finish() error {
+func (c *ServerConn) Finish() error {
 	if c.raw == nil {
 		panic("already closed")
 	}
@@ -65,113 +51,38 @@ func (c *Conn) Finish() error {
 	return c.tls.Close()
 }
 
-func (c *Conn) LocalAddr() net.Addr {
+func (c *ServerConn) LocalAddr() net.Addr {
 	return c.tls.LocalAddr()
 }
 
-func (c *Conn) RemoteAddr() net.Addr {
+func (c *ServerConn) RemoteAddr() net.Addr {
 	return c.tls.RemoteAddr()
 }
 
-func (c *Conn) SetDeadline(t time.Time) error {
+func (c *ServerConn) SetDeadline(t time.Time) error {
 	return c.tls.SetWriteDeadline(t)
 }
 
-func (c *Conn) SetWriteDeadline(t time.Time) error {
+func (c *ServerConn) SetWriteDeadline(t time.Time) error {
 	return c.tls.SetWriteDeadline(t)
 }
 
-func (c *Conn) VerifyHostname(host string) error {
+func (c *ServerConn) VerifyHostname(host string) error {
 	return c.tls.VerifyHostname(host)
 }
 
-func (c *Conn) Write(b []byte) (int, error) {
+func (c *ServerConn) Write(b []byte) (int, error) {
 	return c.tls.Write(b)
 }
 
-type ResponseHeader struct {
-	Status int
-	Meta   string
-}
-
-func StatusInput(status int, message string) ResponseHeader {
-	if status < 10 || status > 19 {
-		panic(status)
-	}
-	return ResponseHeader{status, message}
-}
-
-func StatusSuccess(status int, contentType string) ResponseHeader {
-	if status < 20 || status > 29 {
-		panic(status)
-	}
-	return ResponseHeader{status, contentType}
-}
-
-func StatusOK(contentType string) ResponseHeader {
-	return StatusSuccess(20, contentType)
-}
-
-func StatusRedirect(status int, location *url.URL) ResponseHeader {
-	if status < 30 || status > 39 {
-		panic(status)
-	}
-	return ResponseHeader{status, location.String()}
-}
-
-func StatusTemporaryFailure(status int, message string) ResponseHeader {
-	if status < 40 || status > 49 {
-		panic(status)
-	}
-	return ResponseHeader{status, message}
-}
-
-var StatusNotFound = ResponseHeader{44, "not found"}
-
-func StatusPermanentFailure(status int, message string) ResponseHeader {
-	if status < 50 || status > 59 {
-		panic(status)
-	}
-	return ResponseHeader{status, message}
-}
-
-func StatusClientCertificateRequired(status int, message string) ResponseHeader {
-	if status < 60 || status > 69 {
-		panic(status)
-	}
-	return ResponseHeader{status, message}
-}
-
-func (h ResponseHeader) String() string {
-	if h.Status < 0 || h.Status >= 100 {
-		panic("invalid status code")
-	}
-	if strings.Contains(h.Meta, "\n") {
-		panic("invalid meta string")
-	}
-	return fmt.Sprintf("%02d %s\r\n", h.Status, h.Meta)
-}
-
-func (h ResponseHeader) Bytes() []byte {
-	return []byte(h.String())
-}
-
-func (h ResponseHeader) FinishTo(w WriteFinisher) error {
-	if _, err := w.Write(h.Bytes()); err != nil {
-		return err
-	}
-
-	return w.Finish()
-}
-
 type ResponseWriter struct {
-	conn     WriteCloseFinisher
+	conn     WriteFinisher
 	headDone bool
 	headErr  error
 }
 
-func NewResponseWriter(w WriteCloseFinisher) *ResponseWriter {
-	return &ResponseWriter{conn: w}
+func NewResponseWriter(conn WriteFinisher) *ResponseWriter {
+	return &ResponseWriter{conn: conn}
 }
 
 func (w *ResponseWriter) WriteHeader(h ResponseHeader) {
@@ -184,7 +95,7 @@ func (w *ResponseWriter) WriteHeader(h ResponseHeader) {
 
 func (w *ResponseWriter) Write(b []byte) (int, error) {
 	if !w.headDone {
-		w.WriteHeader(StatusOK("text/gemini"))
+		w.WriteHeader(Success("text/gemini"))
 	}
 	if w.headErr != nil {
 		return 0, w.headErr
@@ -192,32 +103,22 @@ func (w *ResponseWriter) Write(b []byte) (int, error) {
 	return w.conn.Write(b)
 }
 
-// Close uncleanly.  Finish must not be called after this.
-func (w *ResponseWriter) Close() error {
-	return w.conn.Close()
-}
-
-// Finish writing cleanly.  Close can be called after this.
+// Finish writing cleanly.  The underlying connection's Close method can still
+// be called after this.
 func (w *ResponseWriter) Finish() error {
+	if !w.headDone {
+		w.WriteHeader(Success("text/gemini"))
+	}
+	if w.headErr != nil {
+		return w.headErr
+	}
 	return w.conn.Finish()
 }
 
-type HandleFunc func(*Conn, *url.URL)
+type HandleFunc func(*ServerConn, *url.URL)
 
 func Listen(l net.Listener, config *tls.Config, f HandleFunc) error {
-	if config.CipherSuites == nil {
-		config.CipherSuites = []uint16{
-			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-		}
-	}
-	if config.MinVersion == 0 {
-		config.MinVersion = tls.VersionTLS12
-	}
+	config = initTLSConfig(config)
 
 	for {
 		if err := accept(l, config, f); err != nil {
@@ -248,7 +149,7 @@ func accept(l net.Listener, config *tls.Config, f HandleFunc) error {
 	return nil
 }
 
-func Server(rawConn net.Conn, config *tls.Config) (*Conn, *url.URL, error) {
+func Server(rawConn net.Conn, config *tls.Config) (*ServerConn, *url.URL, error) {
 	tlsConn := tls.Server(rawConn, config)
 	r := bufio.NewReader(tlsConn)
 
@@ -266,5 +167,5 @@ func Server(rawConn net.Conn, config *tls.Config) (*Conn, *url.URL, error) {
 		return nil, u, err
 	}
 
-	return &Conn{raw: rawConn, tls: tlsConn}, u, nil
+	return &ServerConn{raw: rawConn, tls: tlsConn}, u, nil
 }
