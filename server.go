@@ -7,7 +7,6 @@ package gemini
 import (
 	"bufio"
 	"crypto/tls"
-	"errors"
 	"log"
 	"net"
 	"net/url"
@@ -157,12 +156,12 @@ func Server(rawConn net.Conn, config *tls.Config) (*ServerConn, *url.URL, error)
 	if err != nil {
 		return nil, nil, err
 	}
-	if !strings.HasSuffix(line, "\r\n") {
-		return nil, nil, errors.New("invalid response header")
+	line = line[:len(line)-1]
+	if strings.HasSuffix(line, "\r") {
+		line = line[:len(line)-1]
 	}
-	uri := line[:len(line)-2]
 
-	u, err := url.Parse(uri)
+	u, err := url.Parse(line)
 	if err != nil {
 		return nil, u, err
 	}

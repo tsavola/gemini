@@ -126,10 +126,10 @@ func (d *Dialer) Dial(ctx context.Context, u *url.URL) (*ClientConn, ResponseHea
 	if err != nil {
 		return nil, ResponseHeader{}, err
 	}
-	if !strings.HasSuffix(line, "\r\n") {
-		return nil, ResponseHeader{}, errors.New("invalid response header")
+	line = line[:len(line)-1]
+	if strings.HasSuffix(line, "\r") {
+		line = line[:len(line)-1]
 	}
-	line = line[:len(line)-2]
 
 	parts := strings.SplitN(line, " ", 2)
 	if len(parts) != 2 {
